@@ -1,0 +1,107 @@
+# 听课助手 配置
+#
+# 保存位置规则(重要):
+#   1) 用户没有明确指示 → 产物放**工作区**下的 <课程名>/课程转写/
+#      (工作区 = 当前目录含 听课助手/ 的那层, 或项目根的父目录; 可用 TINGKE_WORKSPACE 覆盖)
+#   2) 用户明确指定了位置 → 用用户给的目录
+#   3) 切片数据(音频/帧/合成)与笔记同理, 都跟随课程走
+#
+# 下面三个路径留空 = 采用规则 1 的默认落点。
+# 想让所有产物集中到固定盘符(例如 D 盘), 就填上绝对路径。
+
+[paths]
+# 切片数据(音频/帧/合成)的根目录。
+# 留空 → <工作区>/<课程>/课程转写/{字幕,帧,合成}
+# 填路径 → 所有课程的数据都集中到该目录(按 <课程>/<节次> 分层)
+data_root = ""
+
+# 依赖目录(建议放非系统盘, 装完约 100 MB)
+pylibs = "<data_root>/pylibs"
+
+# 笔记(交付物)目录。
+# 留空 → <工作区>/<课程>/课程转写/(与切片数据同处, 便于整门课一起打包)
+# 填路径 → 所有笔记集中到该目录
+notes = ""
+
+# 笔记落点模式: flat = 直接平铺在 <课程>/课程转写/ 下(推荐, 与切片数据同处)
+#               course = 再按课程名建一层子目录(多课程共用一个 notes 目录时用)
+notes_mode = "flat"
+
+# 找不到工作区时的兜底(相对项目根); 一般不用改
+workspace_fallback = ".."
+
+[asr]
+# bcut = 必剪云端(实测可用, 中文效果优于平台字幕); whisper 预留
+provider = "bcut"
+# 修复版 bcut-asr 仓库位置(相对项目根目录; 该仓库已修掉 412 风控等 17 项问题)
+bcut_asr_repo = "bcut-asr"
+poll_interval = 5
+task_timeout = 3600
+# 重切句参数: bcut-asr 平均每段仅 9 字, 需按停顿重切成句级行
+#   gap_ms      段间停顿超过它就断句(实测段内中位 120ms, 句间常 >700ms)
+#   max_chars   单行字数上限
+#   max_dur_ms  单行时长上限
+merge_gap_ms = 1000
+merge_max_chars = 80
+merge_max_dur_ms = 20000
+
+[ffmpeg]
+# 留空则依次尝试: 本项 -> PATH -> imageio-ffmpeg 自带的二进制
+path = ""
+
+[net]
+request_timeout = 30
+# auto | system | doh | pin
+dns_mode = "auto"
+# 需要时手工固定真实 IP, 形如: pin = { "v.sjtu.edu.cn" = "202.120.35.151" }
+pin = {}
+
+[canvas]
+base = "https://oc.sjtu.edu.cn"
+# 账号级外部工具 3136(global_navigation) —— 视频空间 token 的正确入口
+launch_url = "https://oc.sjtu.edu.cn/accounts/1/external_tools/3136?launch_type=global_navigation"
+# 课程级工具 id(仅备用)
+course_tool_id = 8329
+
+[video]
+base = "https://v.sjtu.edu.cn/jy-application-resourcemanage"
+ui = "https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/"
+
+# 通道语义(实测确认, 见 README):
+#   0 = 教室摄像头 -> 黑板手写板书
+#   1 = 屏幕录屏   -> PPT 放映
+board_channel = 0
+ppt_channel = 1
+# 两路音轨一致(16kHz 单声道 AAC 48kbps), 取体积小的那路
+audio_channel = 1
+
+[board]
+# 黑板帧采样间隔(秒)
+interval_sec = 30
+max_width = 1280
+# 摄像头画面一直在动(老师走动/写字), 与"上一保留帧"比较可抑制近似重复
+compare = "last_kept"
+hash_distance = 6
+min_gap_ms = 1500
+max_gap_ms = 60000
+
+[ppt]
+# 与 board 一样走"定时采样 + 对 JPEG 算 dHash 去重"。
+# 实测教训: select 的 scene 比较相邻帧(25fps), PPT 切换动画把变化摊薄, 55 分钟只检出 2 处;
+# 改成流式 dHash 又因静态画面不稳而误判(31 个"变化点"里只有 5 个真实画面)。
+interval_sec = 15
+max_width = 1600
+# 录屏是静态画面, 必须用"相邻采样点"比较(边沿检测):
+# 用"上一保留帧"比较时, 静态段每采样点 1 bit 的噪声会累积成 45 次假变化, 而真实画面只有 4 个。
+compare = "previous"
+hash_distance = 6
+min_gap_ms = 1500
+max_gap_ms = 300000
+
+[disk]
+# 目标盘保留的最小空闲空间(GB)
+min_free_gb = 5
+
+[frames]
+# 每讲保留的帧数上限(超出按时间均匀抽稀)
+max_per_lecture = 400

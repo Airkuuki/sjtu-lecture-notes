@@ -1,0 +1,5 @@
+# 只用纯 Python 包, 避免装编译器/大依赖。
+requests>=2.31.0          # 平台接口请求
+imageio-ffmpeg>=0.5.1     # 自带 ffmpeg 二进制, 不另行安装
+pydantic>=2.0             # bcut-asr 的数据模型
+ffmpeg-python>=0.2.0      # bcut-asr 的音频处理
