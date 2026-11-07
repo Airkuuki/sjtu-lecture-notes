@@ -170,31 +170,41 @@ if ($env:CANVAS_API_KEY) { "已有环境变量" }
 - `has_transcript` 表示平台是否已生成 AI 字幕；新讲有约 **1 周延迟**
 - 周次换算：以第一周第一次课为基准往后推；平台记录里也有 `weekNo` 字段可核对
 
-### 第 4 步：转录（二选一）
+### 第 4 步：转录（自动选源，**不用手动挑**）
 
-**A. 扒平台字幕**（"官方出品"，但新讲没有）
-
-```powershell
-& $py scripts\cli.py subtitles --course-id 2001 --lecture-id 1001
-```
-
-- 有则存 `platform.json/.srt/.txt`；无则明确报 `unavailable`（**不会编造**）
-- 平台字幕是 15~100 秒整块、无句级时间戳，工具会按句末标点切句 + 按字数比例插值
-
-**B. bcut-asr**（立即可用，有句级时间戳）
+一条命令，工具自己决定用哪个来源：**有平台字幕就用平台字幕，没有才跑 bcut-asr**。
 
 ```powershell
 & $py scripts\cli.py transcribe --course-id 2001 --lecture-id 1001
 ```
 
-抽音频（约 2 分钟）+ 识别（约 30 秒），产出 `transcript.json/.srt/.txt`。
+判断顺序（`--provider auto`，默认）：
 
-**C. 两者都要/新讲没有平台字幕时**：额外抓**平台 PPT 切片 OCR**，它是官方 OCR，**术语比语音识别准得多**，用来校正 ASR 的术语错误：
+1. 已有 `transcript.json` → 直接复用（幂等，不重复花钱/花时间）
+2. 已有 `platform.json`（之前扒过）→ 本地转成标准产物，**不联网**
+3. 平台有 AI 字幕（`list-lectures` 里 `has_transcript=true`）→ 扒下来切句，`provider=platform-subtitle`
+4. 平台没字幕（新讲约 1 周延迟）→ 自动回退 bcut-asr（抽音频约 2 分钟 + 识别约 30 秒）
+
+想强制只用一种：
+
+```powershell
+& $py scripts\cli.py transcribe --course-id 2001 --lecture-id 1001 --provider platform
+& $py scripts\cli.py transcribe --course-id 2001 --lecture-id 1001 --provider bcut
+```
+
+`batch` 同样自动选源（也可 `--provider` 强制），**不要**再手动先跑 `subtitles` 再跑 `transcribe`。
+
+- 平台字幕是 15~100 秒整块、**无句级时间戳**，切句后的时间是按字数比例插值的，只用于定位；
+  需要精确句级时间戳时用 `--provider bcut`
+- 想让全局默认改回"一律 bcut"：`config.toml` 里 `[asr] prefer_platform = false`
+- `subtitles` 命令仍保留（只扒平台字幕、不产 `transcript.json`），用于单看官方字幕质量
+
+**平台 PPT 切片 OCR**（官方 OCR，**术语比语音识别准得多**，用来校正术语）：
 
 ```powershell
 # 通过脚本调用平台接口（GET /v1/course/ai/ppt?courseId=<节次id>）
 # 返回 docList[].ocrText / imageSeekTime(秒) / textKeywordList
-# 落到 <data_root>\字幕\<课程>\<节次id>\ppt_ocr.txt
+# 落到 <课程>/课程转写/字幕/<节次id>/ppt_ocr.txt
 ```
 
 ### 第 5 步：抓两路帧（并行，约 4~5 分钟）

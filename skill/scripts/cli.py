@@ -85,10 +85,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_urls.add_argument("--show-url", action="store_true", help="显示完整签名直链")
     p_urls.add_argument("--json", action="store_true")
 
-    p_tr = sub.add_parser("transcribe", help="远程抽音频并用 bcut-asr 转写一讲")
+    p_tr = sub.add_parser(
+        "transcribe", help="拿一讲的文字稿: 有平台字幕用平台的, 没有才跑 bcut-asr"
+    )
     p_tr.add_argument("--course-id", type=int, required=True)
     p_tr.add_argument("--lecture-id", type=int, required=True)
     p_tr.add_argument("--force", action="store_true", help="忽略已有产物重跑")
+    p_tr.add_argument(
+        "--provider",
+        choices=("auto", "platform", "bcut"),
+        default="auto",
+        help="auto=平台字幕优先, 没有才 bcut(默认); platform=只用平台字幕; bcut=只用必剪",
+    )
     p_tr.add_argument(
         "--no-keep-audio",
         dest="keep_audio",
@@ -141,6 +149,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt.add_argument("--limit", type=int, help="最多处理前 N 讲")
     p_bt.add_argument("--force", action="store_true", help="重跑已有产物")
     p_bt.add_argument("--no-notes", action="store_true", help="只到合成, 不生成笔记骨架")
+    p_bt.add_argument(
+        "--provider",
+        choices=("auto", "platform", "bcut"),
+        default="auto",
+        help="转写来源: auto=平台字幕优先(默认); platform=只用平台字幕; bcut=只用必剪",
+    )
     p_bt.add_argument("--json", action="store_true")
 
     return parser
@@ -280,12 +294,14 @@ def cmd_transcribe(cfg: dict[str, Any], args: argparse.Namespace) -> int:
         return EXIT_FAIL
 
     result = transcribe_lecture(
-        cfg, client, course, lecture, force=args.force, keep_audio=args.keep_audio
+        cfg, client, course, lecture,
+        force=args.force, keep_audio=args.keep_audio, provider=args.provider,
     )
     if args.json:
         _print_json(result)
         return EXIT_OK
     print(f"状态: {result['status']}")
+    print(f"来源: {result.get('provider') or '未知'}")
     print(f"工作目录: {result['workdir']}")
     print(f"转写: {result['transcript']}")
     if result.get("segments") is not None:
@@ -530,7 +546,9 @@ def _scan_transcripts(cfg: dict[str, Any]) -> list[dict[str, Any]]:
                     "root": str(root),
                     "course": course,
                     "ref": ref,
-                    "transcribe": (sd / ref / "transcript.json").is_file(),
+                    # 有平台字幕也算"转写就绪"(transcribe 会把它转成标准产物)
+                    "transcribe": (sd / ref / "transcript.json").is_file()
+                    or (sd / ref / "platform.json").is_file(),
                     "board": "board" in modes,
                     "ppt": "ppt" in modes,
                     "board_frames": kept.get("board"),
@@ -649,6 +667,7 @@ def cmd_batch(cfg: dict[str, Any], args: argparse.Namespace) -> int:
             lecture,
             force=args.force,
             with_note=not args.no_notes,
+                provider=args.provider,
         )
         item["seconds"] = round(time.time() - started, 1)
         results.append(item)

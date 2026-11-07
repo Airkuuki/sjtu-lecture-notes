@@ -31,8 +31,11 @@ notes_mode = "flat"
 workspace_fallback = ".."
 
 [asr]
-# bcut = 必剪云端(实测可用, 中文效果优于平台字幕); whisper 预留
+# bcut = 必剪云端; whisper 预留
 provider = "bcut"
+# 平台字幕优先: true = 有平台字幕就用它, 没有才跑 bcut(符合"有字幕抽字幕"的约定)
+# 设为 false 则一律跑 bcut
+prefer_platform = true
 # 修复版 bcut-asr 仓库位置(相对项目根目录; 该仓库已修掉 412 风控等 17 项问题)
 bcut_asr_repo = "bcut-asr"
 poll_interval = 5

@@ -36,7 +36,7 @@ LICENSE                    MIT
 ## 安装
 
 ```powershell
-git clone https://github.com/AIrkuuki/sjtu-lecture-notes
+git clone https://github.com/Airkuuki/sjtu-lecture-notes
 Copy-Item -Recurse .\sjtu-lecture-notes\skill "$env:USERPROFILE\.dsh\skills\sjtu-lecture-notes"
 ```
 

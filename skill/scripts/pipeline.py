@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from asr import (
     SCHEMA,
+    AsrError,
     bcut_json_to_segments,
     merge_segments,
     run_bcut,
@@ -155,18 +156,7 @@ def fetch_platform_subtitles(
             "detail": "平台未生成该讲字幕(courTransferFlag=false); 可改用 transcribe(bcut-asr)",
         }
 
-    fine = split_platform_blocks(blocks)
-    payload = build_payload(
-        cfg,
-        course,
-        lecture,
-        f"platform-ai-subtitle:{lecture.get('id')}",
-        blocks[-1]["end_ms"] if blocks else 0,
-        fine,
-        gap_ms=gap_ms,
-        provider="platform-subtitle",
-    )
-    payload["raw_blocks"] = len(blocks)
+    payload = _platform_payload(cfg, course, lecture, blocks, gap_ms=gap_ms)
     out.mkdir(parents=True, exist_ok=True)
     atomic_write_json(json_path, payload)
     atomic_write_text(srt_path, to_srt(payload["merged"]))
@@ -189,6 +179,67 @@ def fetch_platform_subtitles(
     }
 
 
+def _platform_payload(
+    cfg: dict[str, Any],
+    course: dict[str, Any],
+    lecture: dict[str, Any],
+    blocks: list[dict[str, Any]],
+    gap_ms: int | None = None,
+) -> dict[str, Any]:
+    """平台字幕块 -> 标准 payload(与 bcut 产物同 schema)。"""
+    fine = split_platform_blocks(blocks)
+    payload = build_payload(
+        cfg,
+        course,
+        lecture,
+        f"platform-ai-subtitle:{lecture.get('id')}",
+        blocks[-1]["end_ms"] if blocks else 0,
+        fine,
+        gap_ms=gap_ms,
+        provider="platform-subtitle",
+    )
+    payload["raw_blocks"] = len(blocks)
+    return payload
+
+
+def _use_platform_transcript(
+    cfg: dict[str, Any],
+    course: dict[str, Any],
+    lecture: dict[str, Any],
+    out: Path,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """把平台字幕落成标准 transcript 产物(merge/notes 只认 transcript.json)。"""
+    from common import atomic_write_json, atomic_write_text
+    from asr import to_srt, to_txt
+
+    atomic_write_json(out / "transcript.json", payload)
+    atomic_write_text(out / "transcript.srt", to_srt(payload["merged"]))
+    atomic_write_text(out / "transcript.txt", to_txt(payload["merged"]))
+    q = payload.get("quality") or {}
+    log.info(
+        "平台字幕: %d 块 -> %d 句 / %d 字 -> %s",
+        payload.get("raw_blocks") or 0,
+        q.get("merged", 0),
+        q.get("chars", 0),
+        out / "transcript.json",
+    )
+    return {
+        "status": "ok",
+        "lecture_id": lecture.get("id"),
+        "provider": "platform-subtitle",
+        "workdir": str(out),
+        "transcript": str(out / "transcript.json"),
+        "srt": str(out / "transcript.srt"),
+        "txt": str(out / "transcript.txt"),
+        "platform_json": str(out / "platform.json"),
+        "blocks": payload.get("raw_blocks"),
+        "segments": q.get("segments"),
+        "merged": q.get("merged"),
+        "chars": q.get("chars"),
+    }
+
+
 def transcribe_lecture(
     cfg: dict[str, Any],
     client: Any,
@@ -196,8 +247,16 @@ def transcribe_lecture(
     lecture: dict[str, Any],
     force: bool = False,
     keep_audio: bool = True,
+    provider: str = "auto",
 ) -> dict[str, Any]:
-    """跑完一讲的转写; 已存在则直接复用(幂等)。"""
+    """拿到一讲的文字稿。**有平台字幕就用平台字幕, 没有才跑 bcut-asr。**
+
+    provider:
+      * auto(默认): 先试平台字幕, 不可用再 bcut(由 config asr.prefer_platform 控制)
+      * platform:   只用平台字幕, 不可用则报错(不降级)
+      * bcut:       只用 bcut-asr
+    已存在 transcript.json 时直接复用(幂等); force 时重取。
+    """
     out = lecture_dir(cfg, course, lecture)
     transcript_path = out / "transcript.json"
 
@@ -207,6 +266,7 @@ def transcribe_lecture(
         return {
             "status": "cached",
             "lecture_id": lecture.get("id"),
+            "provider": cached.get("provider"),
             "workdir": str(out),
             "transcript": str(transcript_path),
             "segments": cached.get("quality", {}).get("segments"),
@@ -214,6 +274,45 @@ def transcribe_lecture(
             "chars": cached.get("quality", {}).get("chars"),
         }
 
+    # ── 决定要不要用平台字幕 ──────────────────────────
+    mode = (provider or "auto").strip().lower()
+    if mode == "platform":
+        use_platform = True
+    elif mode == "bcut":
+        use_platform = False
+    else:
+        use_platform = bool((cfg.get("asr") or {}).get("prefer_platform", True))
+
+    platform_json = out / "platform.json"
+    if use_platform:
+        # 1) 本地已有平台字幕缓存 -> 直接转成标准产物, 不再联网
+        if platform_json.is_file() and not force:
+            payload = read_json(platform_json, default={}) or {}
+            if payload.get("merged"):
+                return _use_platform_transcript(cfg, course, lecture, out, payload)
+        # 2) 现取平台字幕
+        try:
+            res = fetch_platform_subtitles(cfg, client, course, lecture, force=force)
+        except Exception as exc:  # noqa: BLE001 — 平台字体失败不应直接终止
+            log.warning("平台字幕获取失败: %s", exc)
+            res = {"status": "error", "detail": str(exc)}
+        status = res.get("status")
+        if status in ("ok", "cached"):
+            payload = read_json(platform_json, default={}) or {}
+            if payload.get("merged"):
+                return _use_platform_transcript(cfg, course, lecture, out, payload)
+        if mode == "platform":
+            raise AsrError(
+                f"该讲没有可用的平台字幕({res.get('detail') or status}); "
+                "去掉 --provider platform 即可自动回退 bcut-asr"
+            )
+        log.info(
+            "节次 %s: 平台字幕不可用(%s), 回退 bcut-asr",
+            lecture.get("id"),
+            res.get("detail") or status,
+        )
+
+    # ── bcut-asr 路径 ─────────────────────────────────
     urls = client.video_urls(lecture["id"])
     channel = pick_channel(urls, int(cfg["video"]["audio_channel"]))
     duration_s = float(channel.get("vod_time") or 0)
@@ -253,6 +352,7 @@ def transcribe_lecture(
     return {
         "status": "ok",
         "lecture_id": lecture.get("id"),
+        "provider": "bcut-asr",
         "workdir": str(out),
         "transcript": str(transcript_path),
         "srt": str(out / "transcript.srt"),
@@ -403,7 +503,7 @@ def lecture_progress(
         "lecture_id": lecture.get("id"),
         "begin": lecture.get("begin"),
         "ref": ref,
-        "transcribe": (tdir / "transcript.json").is_file(),
+        "transcribe": (tdir / "transcript.json").is_file() or (tdir / "platform.json").is_file(),
         "frames": all((froot / mode / "index.json").is_file() for mode in FRAME_MODES),
         "merge": (mdir / "material.md").is_file(),
         "note": notes_exist(cfg, name, note_filename(lecture)),
@@ -423,6 +523,7 @@ def process_lecture(
     lecture: dict[str, Any],
     force: bool = False,
     with_note: bool = True,
+    provider: str = "auto",
 ) -> dict[str, Any]:
     """跑完一讲的全流程: 转写 -> 两路抓帧 -> 合成 -> 笔记骨架。
 
@@ -440,9 +541,9 @@ def process_lecture(
     }
 
     try:
-        result["steps"]["transcribe"] = transcribe_lecture(
-            cfg, client, course, lecture, force=force
-        ).get("status")
+        tr = transcribe_lecture(cfg, client, course, lecture, force=force, provider=provider)
+        result["steps"]["transcribe"] = tr.get("status")
+        result["provider"] = tr.get("provider")
     except Exception as exc:  # noqa: BLE001 — 批量场景要把失败原因带回去
         result["steps"]["transcribe"] = f"error: {exc}"
         result["ok"] = False

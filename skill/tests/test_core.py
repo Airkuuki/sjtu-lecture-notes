@@ -1095,5 +1095,142 @@ class TestImagePathRules(unittest.TestCase):
                 os.chdir(old)
 
 
+class FakeClient:
+    """最小假客户端: 只实现转写要用到的两个接口。"""
+
+    def __init__(self, blocks=None):
+        self.blocks = blocks
+        self.calls = {"subtitles": 0, "video_urls": 0}
+
+    def subtitles(self, video_id):
+        self.calls["subtitles"] += 1
+        return self.blocks
+
+    def video_urls(self, video_id):
+        self.calls["video_urls"] += 1
+        raise RuntimeError("VIDEO-BOOM")   # 走到这里就说明要跑 bcut
+
+
+class TestTranscriptProviderDispatch(unittest.TestCase):
+    """核心约定: 有平台字幕就用平台字幕, 没有才跑 bcut-asr。"""
+
+    BLOCKS = [
+        {"start_ms": 0, "end_ms": 20000, "text": "第一句话在这里。第二句话也在这里。"},
+    ]
+
+    def _cfg(self, tmp):
+        return {
+            "paths": {"data_root": str(tmp / "数据"), "notes": "", "notes_mode": "flat"},
+            "asr": {"bcut_asr_repo": ".", "prefer_platform": True, "merge_gap_ms": 1000},
+            "video": {"audio_channel": 1},
+            "disk": {"min_free_gb": 0},
+        }
+
+    def _course_lecture(self):
+        return (
+            {"id": 1, "name": "课程A"},
+            {"id": 99, "begin": "2026-01-01 09:00:00", "end": "2026-01-01 09:45:00"},
+        )
+
+    def test_prefers_platform_subtitles(self):
+        import tempfile
+        from pathlib import Path as P
+
+        from common import read_json
+        from pipeline import transcribe_lecture
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(P(d))
+            course, lecture = self._course_lecture()
+            client = FakeClient(self.BLOCKS)
+            res = transcribe_lecture(cfg, client, course, lecture)
+            self.assertEqual(res["provider"], "platform-subtitle")
+            self.assertEqual(client.calls["video_urls"], 0)   # 没走 bcut
+            saved = read_json(P(res["transcript"]), default={})
+            self.assertEqual(saved.get("provider"), "platform-subtitle")
+            self.assertTrue((P(d) / "数据" / "字幕" / "课程A" / "20260101_99" / "transcript.srt").is_file())
+
+    def test_falls_back_to_bcut_when_platform_unavailable(self):
+        import tempfile
+        from pathlib import Path as P
+
+        from pipeline import transcribe_lecture
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(P(d))
+            course, lecture = self._course_lecture()
+            client = FakeClient(None)          # 平台没字幕
+            with self.assertRaises(RuntimeError) as ctx:
+                transcribe_lecture(cfg, client, course, lecture)
+            self.assertIn("VIDEO-BOOM", str(ctx.exception))   # 已回退到 bcut 路径
+            self.assertEqual(client.calls["subtitles"], 1)
+
+    def test_platform_only_raises_instead_of_falling_back(self):
+        import tempfile
+        from pathlib import Path as P
+
+        from asr import AsrError
+        from pipeline import transcribe_lecture
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(P(d))
+            course, lecture = self._course_lecture()
+            client = FakeClient(None)
+            with self.assertRaises(AsrError):
+                transcribe_lecture(cfg, client, course, lecture, provider="platform")
+            self.assertEqual(client.calls["video_urls"], 0)
+
+    def test_bcut_mode_skips_platform_entirely(self):
+        import tempfile
+        from pathlib import Path as P
+
+        from pipeline import transcribe_lecture
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(P(d))
+            course, lecture = self._course_lecture()
+            client = FakeClient(self.BLOCKS)
+            with self.assertRaises(RuntimeError):
+                transcribe_lecture(cfg, client, course, lecture, provider="bcut")
+            self.assertEqual(client.calls["subtitles"], 0)    # 根本没问平台
+
+    def test_materializes_cached_platform_json_without_network(self):
+        import tempfile
+        from pathlib import Path as P
+
+        from pipeline import transcribe_lecture
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(P(d))
+            course, lecture = self._course_lecture()
+            # 先跑一次, 生成 platform.json
+            transcribe_lecture(cfg, FakeClient(self.BLOCKS), course, lecture)
+            out = P(d) / "数据" / "字幕" / "课程A" / "20260101_99"
+            (out / "transcript.json").unlink()
+            (out / "transcript.srt").unlink()
+            (out / "transcript.txt").unlink()
+            # 再用一个"一问就炸"的客户端: 应该只读本地缓存
+            client = FakeClient(None)
+            client.subtitles = lambda v: (_ for _ in ()).throw(AssertionError("不该联网"))
+            res = transcribe_lecture(cfg, client, course, lecture)
+            self.assertEqual(res["provider"], "platform-subtitle")
+            self.assertTrue((out / "transcript.json").is_file())
+
+    def test_prefer_platform_false_means_bcut(self):
+        import tempfile
+        from pathlib import Path as P
+
+        from pipeline import transcribe_lecture
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(P(d))
+            cfg["asr"]["prefer_platform"] = False
+            course, lecture = self._course_lecture()
+            client = FakeClient(self.BLOCKS)
+            with self.assertRaises(RuntimeError):
+                transcribe_lecture(cfg, client, course, lecture)
+            self.assertEqual(client.calls["subtitles"], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
